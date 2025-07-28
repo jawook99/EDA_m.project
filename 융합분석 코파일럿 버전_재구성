@@ -1,0 +1,175 @@
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import (
+    TimeoutException,
+    NoAlertPresentException,
+    UnexpectedAlertPresentException
+)
+from bs4 import BeautifulSoup
+import pandas as pd
+import time
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1) 설정 & 초기화
+# ─────────────────────────────────────────────────────────────────────────────
+
+def init_driver():
+    options = Options()
+    options.add_experimental_option("detach", True)
+    driver = webdriver.Chrome(options=options)
+    driver.get("https://taas.koroad.or.kr/gis/mcm/mcl/initMap.do?menuId=GIS_GMP_STS_RSN")
+    return driver
+
+driver = init_driver()
+
+# 팝업 에러 무시 설정
+import warnings
+warnings.filterwarnings('ignore')
+
+# 결과 저장용 DataFrame
+region_df = pd.DataFrame(columns=['구분번호', '시군구', '도로종류', '도로명'])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2) 유틸리티 함수
+# ─────────────────────────────────────────────────────────────────────────────
+
+def safe_click(driver, css_selector, timeout=5):
+    """
+    클릭 전/후 alert 감지 → 자동 accept. 
+    알림 발생 시 False, 정상 클릭 시 True 반환.
+    """
+    try:
+        # 클릭 전 alert 확인
+        WebDriverWait(driver, 1).until(EC.alert_is_present())
+        alert = driver.switch_to.alert
+        alert.accept()
+        return False
+    except (TimeoutException, NoAlertPresentException):
+        pass
+
+    try:
+        # 버튼 클릭
+        btn = WebDriverWait(driver, timeout).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, css_selector))
+        )
+        btn.click()
+
+        # 클릭 후 alert 확인
+        WebDriverWait(driver, 2).until(EC.alert_is_present())
+        alert = driver.switch_to.alert
+        alert.accept()
+        return False
+    except TimeoutException:
+        # 버튼 클릭 실패
+        return False
+    except UnexpectedAlertPresentException:
+        # 예외적 alert 처리
+        alert = driver.switch_to.alert
+        alert.accept()
+        return False
+
+
+def get_data(driver):
+    """
+    사고 목록 팝업을 스크롤하며 '구분번호'와 '시군구'를 수집.
+    """
+    numbers, regions, seen = [], [], set()
+    # 팝업창으로 전환
+    driver.switch_to.window(driver.window_handles[-1])
+    time.sleep(1)
+    viewport = driver.find_element(By.CLASS_NAME, "slick-viewport")
+
+    prev_count = 0
+    for _ in range(700):
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        items = soup.select("#accidentInfoListView .slick-viewport > div > div")
+        for it in items:
+            num = it.select_one(".slick-cell.l0.r0").get_text(strip=True)
+            reg = it.select_one(".slick-cell.l3.r3").get_text(strip=True)
+            if num not in seen:
+                seen.add(num)
+                numbers.append(num)
+                regions.append(reg)
+
+        driver.execute_script("arguments[0].scrollTop += 200", viewport)
+        time.sleep(0.3)
+        if len(seen) == prev_count:
+            break
+        prev_count = len(seen)
+
+    driver.close()
+    driver.switch_to.window(driver.window_handles[0])
+    return numbers, regions
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3) 페이지 초기 이동 & 사고 유형 선택
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 융합 분석 메뉴 진입
+driver.find_element(By.CSS_SELECTOR, "#menuRoadNoSearch > a").click()
+time.sleep(0.3)
+
+# 사고 유형 체크박스 초기화 후 4개 모두 선택
+type_sel = "#ptsNafCh1AccidentContent > li > input[type=checkbox]"
+cbs = driver.find_elements(By.CSS_SELECTOR, type_sel)
+for cb in cbs:
+    if cb.is_selected():
+        cb.click()
+for cb in cbs[:4]:
+    cb.click()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4) 연도 · 도로 등급 · 도로명 순환 및 데이터 수집
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 연도 옵션 인덱스 (2014~2024, 3년 단위)
+years = driver.find_elements(By.CSS_SELECTOR, "#ptsNafYearStart > option")
+year_idxs = list(range(len(years) - 1, 6, -3))
+
+for yi in year_idxs:
+    Select(driver.find_element(By.ID, "ptsNafYearStart")).select_by_index(yi)
+    Select(driver.find_element(By.ID, "ptsNafYearEnd")).select_by_index(0)
+
+    # 도로 등급 목록
+    ranks = [opt.text for opt in driver.find_elements(By.CSS_SELECTOR, "#ptsNafRoadRank > option")]
+    for rank in ranks:
+        Select(driver.find_element(By.ID, "ptsNafRoadRank")).select_by_visible_text(rank)
+        time.sleep(0.1)
+
+        # 도로명 목록
+        names = [opt.text for opt in driver.find_elements(By.CSS_SELECTOR, "#ptsNafCh1RoadName > option")]
+        for name in names:
+            Select(driver.find_element(By.ID, "ptsNafCh1RoadName")).select_by_visible_text(name)
+            time.sleep(0.5)
+
+            # 검색 버튼 클릭 + 결과 유무 확인
+            has_data = safe_click(driver, 
+                "#roadNumberAccidentFind > div:nth-child(4) > p > a", timeout=5
+            )
+            if not has_data:
+                continue
+
+            # 목록보기 버튼 클릭
+            safe_click(driver, "#roadNumberAccidentFind .searc-total .btn > p > a", timeout=5)
+            time.sleep(0.3)
+
+            # 데이터 수집 및 저장
+            nums, regs = get_data(driver)
+            for n, r in zip(nums, regs):
+                region_df.loc[len(region_df)] = [n, r, rank, name]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5) 결과 정렬 및 파일 저장
+# ─────────────────────────────────────────────────────────────────────────────
+
+region_df.sort_values("구분번호", inplace=True, ignore_index=True)
+save_path = "C:/Users/USER/Downloads/region_df.csv"
+region_df.to_csv(save_path, index=False)
+print("파일 저장 완료:", save_path)

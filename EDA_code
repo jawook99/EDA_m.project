@@ -1,0 +1,193 @@
+# %% [code]
+# 데이터 불러오기
+path = os.getcwd()
+df1 = pd.read_csv(os.path.join(path, 'TAAS_사고분석.csv'), encoding='utf-8')
+df2 = pd.read_csv(os.path.join(path, 'TAAS_융합분석.csv'), encoding='utf-8')
+
+# 출처 컬럼 추가 및 병합
+df1['source'] = '사고분석'
+df2['source'] = '융합분석'
+df = pd.concat([df1, df2], ignore_index=True)
+print(f"전체 행 개수: {len(df):,}")
+
+# %% [code]
+# 위험도 통합 지표 계산
+for col in ['사망자수', '중상자수', '경상자수']:
+    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+df['incident_score'] = 1.0 + 0.7 * (df['중상자수'] > 0) + 0.3 * (df['경상자수'] > 0)
+df['severity_score'] = df['사망자수'] + df['중상자수'] * 0.7 + df['경상자수'] * 0.3
+df['total_risk'] = df['incident_score'] * 0.4 + df['severity_score'] * 0.6
+
+# %% [code]
+# 수치형 변수 정의
+num_cols = ['사망자수', '중상자수', '경상자수', '부상신고자수',
+            'incident_score', 'severity_score', 'total_risk']
+
+# %% [code]
+# 수치형 변수 간 상관관계 히트맵
+plt.figure(figsize=(10, 8))
+sns.heatmap(df[num_cols].corr(), annot=True, cmap='coolwarm', fmt=".2f")
+plt.title("수치형 변수 상관관계", fontproperties=font_prop, fontsize=14)
+plt.xticks(fontproperties=font_prop)
+plt.yticks(fontproperties=font_prop)
+plt.tight_layout()
+plt.show()
+
+# %% [code]
+# 수치형 변수 간 관계 시각화 (Pairplot)
+# - 변수 간의 상관관계나 패턴 확인에 유용
+# - 산점도, 히스토그램, 분포 밀도 등을 한눈에 비교 가능
+# - 전체 데이터가 많으면 렌더링 느려지므로 최대 5,000건 샘플링
+
+sample = df.sample(5000, random_state=42) if len(df) > 5000 else df
+
+# pairplot 그리기
+sns.pairplot(sample[num_cols])  # num_cols: 수치형 변수 리스트 (사망자수, 중상자수 등)
+plt.suptitle("수치형 변수 Pairplot", y=1.02, fontproperties=font_prop)  # 전체 제목
+plt.show()
+
+# %% [code]
+# 도로형태별 total_risk 박스플롯 - 원본
+if '도로형태' in df.columns:
+    plt.figure(figsize=(12, 6))
+    sns.boxplot(data=df, x='도로형태', y='total_risk')
+    plt.title("도로형태별 위험도 (전체)", fontproperties=font_prop)
+    plt.xticks(rotation=45, fontproperties=font_prop)
+    plt.tight_layout()
+    plt.show()
+
+# %% [code]
+# 도로형태별 total_risk 박스플롯 - y축 상한 제한 (ex: 3.0)
+if '도로형태' in df.columns:
+    plt.figure(figsize=(12, 6))
+    sns.boxplot(data=df, x='도로형태', y='total_risk')
+    plt.ylim(0, 3.0)  # y축 제한 설정
+    plt.title("도로형태별 위험도 (y축 제한)", fontproperties=font_prop)
+    plt.xticks(rotation=45, fontproperties=font_prop)
+    plt.tight_layout()
+    plt.show()
+
+### 데이터가 있으면 아래 시각화 코드 실행
+
+# %% [code]
+# 통행량 vs 사고건수 산점도
+if {'통행량', '사고건수'}.issubset(df.columns):
+    df['통행량'] = pd.to_numeric(df['통행량'], errors='coerce')
+    df['사고건수'] = pd.to_numeric(df['사고건수'], errors='coerce')
+    plt.figure(figsize=(8, 6))
+    sns.scatterplot(data=df, x='통행량', y='사고건수', hue='도로형태' if '도로형태' in df.columns else None, alpha=0.6)
+    plt.title("통행량 vs 사고건수", fontproperties=font_prop)
+    plt.tight_layout()
+    plt.show()
+
+# %% [code]
+# 시군구별 total_risk 합계 상위 10개 바플롯
+if '시군구' in df.columns:
+    top10 = df.groupby('시군구')['total_risk'].sum().sort_values(ascending=False).head(10)
+    plt.figure(figsize=(12, 6))
+    sns.barplot(x=top10.index, y=top10.values)
+    plt.title("Top 10 위험 시군구", fontproperties=font_prop)
+    plt.xticks(rotation=45, fontproperties=font_prop)
+    plt.tight_layout()
+    plt.show()
+
+# %% [code]
+# 수치형 변수의 분포 시각화 (KDE 또는 Histogram)
+# - 이상치 제거 후 분포 확인
+# - 변수 특성에 따라 histplot 또는 kdeplot 자동 선택
+# - 해석 주석 출력 포함
+
+for col in num_cols:
+    try:
+        # 수치형 변환 및 결측 제거
+        series = pd.to_numeric(df[col], errors='coerce').dropna()
+        if len(series) == 0:
+            continue
+
+        # 이상치 제거 (하위 0.1%, 상위 99.5%)
+        q_low, q_high = series.quantile([0.001, 0.995])
+        series = series[(series >= q_low) & (series <= q_high)]
+
+        # 시각화 시작
+        plt.figure(figsize=(10, 4))
+
+        # 이산형 변수 또는 고유값 적은 경우: histplot
+        if series.nunique() < 10 or col in ['incident_score', '사망자수', '중상자수']:
+            sns.histplot(series, bins=range(int(series.min()), int(series.max()) + 2), kde=False)
+        else:
+            sns.kdeplot(series, fill=True, bw_adjust=0.5)
+
+        plt.title(f"{col} 분포 (이상치 제외)", fontproperties=font_prop)
+        plt.xlabel(col, fontproperties=font_prop)
+        plt.ylabel("밀도", fontproperties=font_prop)
+        plt.xticks(fontproperties=font_prop)
+        plt.yticks(fontproperties=font_prop)
+        plt.tight_layout()
+        plt.show()
+
+        # 변수별 해석 출력
+        if col == "total_risk":
+            print("total_risk: 통합 위험도 지표. 사고의 심각성과 빈도를 함께 고려. 높은 값은 중대사고 가능성.")
+        elif col == "severity_score":
+            print("severity_score: 사망자 및 중상자 수에 기반한 심각도 지표. 치명도 높은 사고에서 높게 나타남.")
+        elif col == "incident_score":
+            print("incident_score: 사고 발생 자체에 대한 단순 점수.")
+        elif col == "부상신고자수":
+            print("부상신고자수")
+        elif col == "경상자수":
+            print("경상자수")
+        elif col == "중상자수":
+            print("중상자수")
+        elif col == "사망자수":
+            print("사망자수")
+
+    except Exception as e:
+        print(f"{col} skipped: {e}")
+
+# %% [code]
+# statsmodels: 다중 회귀분석을 통한 변수 해석
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+
+# 필수 컬럼이 있는 경우에만 실행
+required_cols = {'사망자수', '중상자수', '경상자수', 'total_risk'}
+if required_cols.issubset(df.columns):
+    # 결측치 제거
+    df_stats = df[list(required_cols)].dropna()
+
+    # 회귀 모델 적합 (종속변수: total_risk)
+    model = smf.ols("total_risk ~ 사망자수 + 중상자수 + 경상자수", data=df_stats).fit()
+
+    # 요약 출력
+    print(model.summary())
+
+# %% [code]
+# SHAP: 머신러닝 모델 기반 변수 중요도 해석
+import shap
+import xgboost as xgb
+from sklearn.model_selection import train_test_split
+
+# 컬럼 존재 시 실행
+feature_cols = ['사망자수', '중상자수', '경상자수']
+target_col = 'total_risk'
+
+if set(feature_cols + [target_col]).issubset(df.columns):
+    df_shap = df[feature_cols + [target_col]].dropna()
+
+    # 데이터 분리
+    X = df_shap[feature_cols]
+    y = df_shap[target_col]
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # 모델 학습
+    model = xgb.XGBRegressor()
+    model.fit(X_train, y_train)
+
+    # SHAP 값 계산
+    explainer = shap.Explainer(model)
+    shap_values = explainer(X_test)
+
+    # 요약 그래프 출력
+    shap.summary_plot(shap_values, X_test)
